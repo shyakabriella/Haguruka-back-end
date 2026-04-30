@@ -12,6 +12,22 @@ Route::controller(RegisterController::class)->group(function () {
 Route::middleware('auth:sanctum')->group(function () {
     /*
     |--------------------------------------------------------------------------
+    | Users & Roles routes
+    |--------------------------------------------------------------------------
+    | These methods are inside RegisterController.
+    |--------------------------------------------------------------------------
+    */
+    Route::get('roles', [RegisterController::class, 'roles']);
+
+    Route::get('users', [RegisterController::class, 'users']);
+    Route::post('users', [RegisterController::class, 'storeUser']);
+    Route::get('users/{id}', [RegisterController::class, 'showUser']);
+    Route::patch('users/{id}', [RegisterController::class, 'updateUser']);
+    Route::put('users/{id}', [RegisterController::class, 'updateUser']);
+    Route::delete('users/{id}', [RegisterController::class, 'deleteUser']);
+
+    /*
+    |--------------------------------------------------------------------------
     | Preferred routes
     |--------------------------------------------------------------------------
     */
@@ -24,7 +40,6 @@ Route::middleware('auth:sanctum')->group(function () {
     |--------------------------------------------------------------------------
     | Legacy compatibility routes
     |--------------------------------------------------------------------------
-    | Keep these if some old frontend code still uses /reports
     */
     Route::post('reports', [VictimReportController::class, 'store']);
     Route::post('reports/quick-emergency', [VictimReportController::class, 'quickEmergency']);

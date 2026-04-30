@@ -2,11 +2,12 @@
 
 namespace App\Models;
 
+use App\Models\Role;
+use App\Models\VictimReport;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
-use App\Models\Role;
 
 class User extends Authenticatable
 {
@@ -53,7 +54,7 @@ class User extends Authenticatable
     }
 
     /**
-     * User roles relationship
+     * User roles relationship.
      */
     public function roles()
     {
@@ -61,7 +62,15 @@ class User extends Authenticatable
     }
 
     /**
-     * Check if user has a specific role by slug
+     * User victim reports relationship.
+     */
+    public function victimReports()
+    {
+        return $this->hasMany(VictimReport::class);
+    }
+
+    /**
+     * Check if user has a specific role by slug.
      */
     public function hasRole(string $slug): bool
     {

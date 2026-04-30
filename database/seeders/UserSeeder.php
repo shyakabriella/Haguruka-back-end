@@ -33,33 +33,7 @@ class UserSeeder extends Seeder
                 'is_active' => true,
                 'role_slug' => 'haguruka_staff',
             ],
-            [
-                'name' => 'Police Officer',
-                'email' => 'police@haguruka.rw',
-                'phone' => '0780000003',
-                'password' => 'password123',
-                'status' => 'active',
-                'is_active' => true,
-                'role_slug' => 'police',
-            ],
-            [
-                'name' => 'Health Officer',
-                'email' => 'health@haguruka.rw',
-                'phone' => '0780000004',
-                'password' => 'password123',
-                'status' => 'active',
-                'is_active' => true,
-                'role_slug' => 'health_officer',
-            ],
-            [
-                'name' => 'Local Leader',
-                'email' => 'leader@haguruka.rw',
-                'phone' => '0780000005',
-                'password' => 'password123',
-                'status' => 'active',
-                'is_active' => true,
-                'role_slug' => 'local_leader',
-            ],
+                       
         ];
 
         foreach ($users as $item) {

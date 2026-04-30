@@ -25,6 +25,7 @@ class VictimReport extends Model
     ];
 
     protected $casts = [
+        'user_id'   => 'integer',
         'latitude'  => 'decimal:7',
         'longitude' => 'decimal:7',
     ];
