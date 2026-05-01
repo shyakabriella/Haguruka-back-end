@@ -7,10 +7,10 @@ use App\Models\ReportEvidence;
 use App\Models\VictimReport;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
 
 class VictimReportController extends Controller
 {
@@ -87,6 +87,17 @@ class VictimReportController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
+        /*
+        |--------------------------------------------------------------------------
+        | Important evidence upload fix
+        |--------------------------------------------------------------------------
+        | Mobile app must send files using multipart/form-data:
+        | evidences[] = file
+        |
+        | We do NOT validate "evidence" as file because the mobile app keeps
+        | local evidence metadata in a field called evidence.
+        |--------------------------------------------------------------------------
+        */
         $validator = Validator::make($request->all(), [
             'language'      => ['nullable', 'string', 'max:20'],
             'reporter_role' => ['nullable', 'string', 'max:50'],
@@ -99,7 +110,6 @@ class VictimReportController extends Controller
 
             'evidences'     => ['nullable', 'array'],
             'evidences.*'   => ['file', 'max:20480'],
-            'evidence'      => ['nullable', 'file', 'max:20480'],
         ]);
 
         if ($validator->fails()) {
@@ -191,14 +201,6 @@ class VictimReportController extends Controller
 
         $validated = $validator->validated();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Important fix
-        |--------------------------------------------------------------------------
-        | Your database rejected urgency = "high".
-        | So Quick Emergency now stores urgency = "urgent".
-        |--------------------------------------------------------------------------
-        */
         $urgency = $this->safeColumnValue(
             'victim_reports',
             'urgency',
@@ -206,14 +208,6 @@ class VictimReportController extends Controller
             'low'
         );
 
-        /*
-        |--------------------------------------------------------------------------
-        | Safe values for enum databases
-        |--------------------------------------------------------------------------
-        | If your case_type column does not allow "emergency", it will fallback
-        | to "other" automatically.
-        |--------------------------------------------------------------------------
-        */
         $caseType = $this->safeColumnValue(
             'victim_reports',
             'case_type',
@@ -394,12 +388,30 @@ class VictimReportController extends Controller
         $files = [];
 
         if ($request->hasFile('evidence')) {
-            $files[] = $request->file('evidence');
+            $singleFile = $request->file('evidence');
+
+            if (is_array($singleFile)) {
+                foreach ($singleFile as $file) {
+                    if ($file && $file->isValid()) {
+                        $files[] = $file;
+                    }
+                }
+            } elseif ($singleFile && $singleFile->isValid()) {
+                $files[] = $singleFile;
+            }
         }
 
         if ($request->hasFile('evidences')) {
-            foreach ($request->file('evidences') as $file) {
-                $files[] = $file;
+            $uploadedFiles = $request->file('evidences');
+
+            if (is_array($uploadedFiles)) {
+                foreach ($uploadedFiles as $file) {
+                    if ($file && $file->isValid()) {
+                        $files[] = $file;
+                    }
+                }
+            } elseif ($uploadedFiles && $uploadedFiles->isValid()) {
+                $files[] = $uploadedFiles;
             }
         }
 
@@ -553,9 +565,6 @@ class VictimReportController extends Controller
 
     /**
      * Safely save values for ENUM columns.
-     *
-     * If the column is enum and the wanted value is not allowed,
-     * fallback will be used.
      */
     private function safeColumnValue(
         string $table,
