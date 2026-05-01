@@ -22,12 +22,24 @@ class VictimReport extends Model
         'latitude',
         'longitude',
         'status',
+
+        // Case final action fields
+        'withdraw_reason',
+        'withdrawn_at',
+        'withdrawn_by',
+        'closed_reason',
+        'closed_at',
+        'closed_by',
     ];
 
     protected $casts = [
-        'user_id'   => 'integer',
-        'latitude'  => 'decimal:7',
-        'longitude' => 'decimal:7',
+        'user_id'      => 'integer',
+        'latitude'     => 'decimal:7',
+        'longitude'    => 'decimal:7',
+        'withdrawn_at' => 'datetime',
+        'withdrawn_by' => 'integer',
+        'closed_at'    => 'datetime',
+        'closed_by'    => 'integer',
     ];
 
     public function evidences()
@@ -38,5 +50,25 @@ class VictimReport extends Model
     public function user()
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function withdrawnBy()
+    {
+        return $this->belongsTo(User::class, 'withdrawn_by');
+    }
+
+    public function closedBy()
+    {
+        return $this->belongsTo(User::class, 'closed_by');
+    }
+
+    public function followUpTasks()
+    {
+        return $this->hasMany(CaseFollowUpTask::class, 'victim_report_id');
+    }
+
+    public function appointments()
+    {
+        return $this->hasMany(Appointment::class, 'victim_report_id');
     }
 }

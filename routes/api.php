@@ -3,6 +3,12 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\API\RegisterController;
 use App\Http\Controllers\API\VictimReportController;
+use App\Http\Controllers\API\CaseFollowUpTaskController;
+use App\Http\Controllers\API\AppointmentController;
+use App\Http\Controllers\API\OrganizationController;
+use App\Http\Controllers\API\ServicePointController;
+use App\Http\Controllers\API\ReportController;
+use App\Http\Controllers\API\CaseActionController;
 
 Route::controller(RegisterController::class)->group(function () {
     Route::post('register', 'register');
@@ -13,8 +19,6 @@ Route::middleware('auth:sanctum')->group(function () {
     /*
     |--------------------------------------------------------------------------
     | Users & Roles routes
-    |--------------------------------------------------------------------------
-    | These methods are inside RegisterController.
     |--------------------------------------------------------------------------
     */
     Route::get('roles', [RegisterController::class, 'roles']);
@@ -28,17 +32,106 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Preferred routes
+    | Victim Reports routes
     |--------------------------------------------------------------------------
     */
     Route::post('victim-reports', [VictimReportController::class, 'store']);
     Route::post('victim-reports/quick-emergency', [VictimReportController::class, 'quickEmergency']);
     Route::get('victim-reports', [VictimReportController::class, 'index']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Case Follow-Up Task routes
+    |--------------------------------------------------------------------------
+    */
+    Route::get('victim-reports/{report}/follow-up-tasks', [CaseFollowUpTaskController::class, 'index']);
+    Route::post('victim-reports/{report}/follow-up-tasks', [CaseFollowUpTaskController::class, 'store']);
+
+    Route::patch('case-follow-up-tasks/{task}', [CaseFollowUpTaskController::class, 'update']);
+    Route::put('case-follow-up-tasks/{task}', [CaseFollowUpTaskController::class, 'update']);
+    Route::delete('case-follow-up-tasks/{task}', [CaseFollowUpTaskController::class, 'destroy']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Victim Case Actions routes
+    |--------------------------------------------------------------------------
+    | Used by mobile app:
+    | POST /api/victim-reports/{id}/withdraw
+    | POST /api/victim-reports/{id}/close
+    |--------------------------------------------------------------------------
+    */
+    Route::post('victim-reports/{report}/withdraw', [CaseActionController::class, 'withdraw']);
+    Route::post('victim-reports/{report}/close', [CaseActionController::class, 'close']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Appointments routes
+    |--------------------------------------------------------------------------
+    */
+    Route::get('appointments', [AppointmentController::class, 'index']);
+    Route::post('appointments', [AppointmentController::class, 'store']);
+    Route::get('appointments/{appointment}', [AppointmentController::class, 'show']);
+    Route::patch('appointments/{appointment}', [AppointmentController::class, 'update']);
+    Route::put('appointments/{appointment}', [AppointmentController::class, 'update']);
+    Route::delete('appointments/{appointment}', [AppointmentController::class, 'destroy']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Service Directory - Organizations routes
+    |--------------------------------------------------------------------------
+    */
+    Route::get('organizations', [OrganizationController::class, 'index']);
+    Route::post('organizations', [OrganizationController::class, 'store']);
+    Route::get('organizations/{organization}', [OrganizationController::class, 'show']);
+    Route::patch('organizations/{organization}', [OrganizationController::class, 'update']);
+    Route::put('organizations/{organization}', [OrganizationController::class, 'update']);
+    Route::delete('organizations/{organization}', [OrganizationController::class, 'destroy']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Service Directory - Service Points routes
+    |--------------------------------------------------------------------------
+    */
+    Route::get('service-points', [ServicePointController::class, 'index']);
+    Route::post('service-points', [ServicePointController::class, 'store']);
+    Route::get('service-points/{servicePoint}', [ServicePointController::class, 'show']);
+    Route::patch('service-points/{servicePoint}', [ServicePointController::class, 'update']);
+    Route::put('service-points/{servicePoint}', [ServicePointController::class, 'update']);
+    Route::delete('service-points/{servicePoint}', [ServicePointController::class, 'destroy']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Reports & Statistics routes
+    |--------------------------------------------------------------------------
+    | Keep reports/summary before reports/{id}.
+    |--------------------------------------------------------------------------
+    */
+    Route::get('reports/summary', [ReportController::class, 'summary']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Case Status Update route
+    |--------------------------------------------------------------------------
+    | Keep this before victim-reports/{id}.
+    |--------------------------------------------------------------------------
+    */
+    Route::patch('victim-reports/{id}/status', [VictimReportController::class, 'updateStatus']);
+    Route::put('victim-reports/{id}/status', [VictimReportController::class, 'updateStatus']);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Single Victim Report route
+    |--------------------------------------------------------------------------
+    | Keep this after special victim-report routes.
+    |--------------------------------------------------------------------------
+    */
     Route::get('victim-reports/{id}', [VictimReportController::class, 'show']);
 
     /*
     |--------------------------------------------------------------------------
     | Legacy compatibility routes
+    |--------------------------------------------------------------------------
+    | Keep reports/summary above these routes.
     |--------------------------------------------------------------------------
     */
     Route::post('reports', [VictimReportController::class, 'store']);
