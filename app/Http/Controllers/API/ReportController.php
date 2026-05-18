@@ -7,6 +7,7 @@ use App\Models\Appointment;
 use App\Models\CaseFollowUpTask;
 use App\Models\VictimReport;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -25,13 +26,23 @@ class ReportController extends Controller
         }
 
         $validator = Validator::make($request->all(), [
-            'range'       => ['nullable', 'in:7,30,90,365'],
-            'from'        => ['nullable', 'date'],
-            'to'          => ['nullable', 'date'],
-            'report_type' => ['nullable', 'in:summary,district,case_type,status,channel,urgent,follow_up,appointments'],
-            'type'        => ['nullable', 'string'],
-            'status'      => ['nullable', 'string'],
-            'channel'     => ['nullable', 'string'],
+            'range'            => ['nullable', 'in:7,30,90,365'],
+
+            // Old names support
+            'from'             => ['nullable', 'date', 'before_or_equal:today'],
+            'to'               => ['nullable', 'date', 'before_or_equal:today'],
+
+            // New names from React frontend
+            'from_date'        => ['nullable', 'date', 'before_or_equal:today'],
+            'to_date'          => ['nullable', 'date', 'before_or_equal:today'],
+
+            'report_category'  => ['nullable', 'in:general,individual'],
+            'individual_query' => ['nullable', 'string', 'max:255'],
+
+            'report_type'      => ['nullable', 'in:summary,district,case_type,status,channel,urgent,follow_up,appointments'],
+            'type'             => ['nullable', 'string'],
+            'status'           => ['nullable', 'string'],
+            'channel'          => ['nullable', 'string'],
         ]);
 
         if ($validator->fails()) {
@@ -43,15 +54,54 @@ class ReportController extends Controller
         }
 
         $range = (int) $request->get('range', 30);
-        $to = $request->filled('to')
-            ? Carbon::parse($request->to)->endOfDay()
+
+        if (!in_array($range, [7, 30, 90, 365], true)) {
+            $range = 30;
+        }
+
+        $reportCategory = $request->get('report_category', 'general');
+        $reportType = $request->get('report_type', 'summary');
+
+        $toInput = $request->input('to_date') ?: $request->input('to');
+        $fromInput = $request->input('from_date') ?: $request->input('from');
+
+        $to = $toInput
+            ? Carbon::parse($toInput)->endOfDay()
             : now()->endOfDay();
 
-        $from = $request->filled('from')
-            ? Carbon::parse($request->from)->startOfDay()
-            : $to->copy()->subDays($range)->startOfDay();
+        $from = $fromInput
+            ? Carbon::parse($fromInput)->startOfDay()
+            : $to->copy()->subDays(max($range - 1, 0))->startOfDay();
 
-        $reportType = $request->get('report_type', 'summary');
+        $today = now()->endOfDay();
+
+        if ($from->gt($today) || $to->gt($today)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Future dates are not allowed for report generation.',
+            ], 422);
+        }
+
+        if ($from->gt($to)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'From date cannot be after to date.',
+            ], 422);
+        }
+
+        $individualQuery = trim((string) $request->get('individual_query', ''));
+
+        if ($reportCategory === 'individual' && $individualQuery === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Please provide Case Code, Phone, Name, Email, or National ID for individual report.',
+            ], 422);
+        }
+
+        $hasTypeFilter = $request->filled('type') && $request->type !== 'all';
+        $hasStatusFilter = $request->filled('status') && $request->status !== 'all';
+        $hasChannelFilter = $request->filled('channel') && $request->channel !== 'all';
+        $hasCaseSpecificFilter = $hasTypeFilter || $hasStatusFilter || $hasChannelFilter || $reportCategory === 'individual';
 
         $caseQuery = VictimReport::query()
             ->with([
@@ -60,16 +110,20 @@ class ReportController extends Controller
             ])
             ->whereBetween('created_at', [$from, $to]);
 
-        if ($request->filled('type') && $request->type !== 'all') {
+        if ($hasTypeFilter) {
             $caseQuery->where('case_type', $request->type);
         }
 
-        if ($request->filled('status') && $request->status !== 'all') {
+        if ($hasStatusFilter) {
             $caseQuery->where('status', $request->status);
         }
 
-        if ($request->filled('channel') && $request->channel !== 'all') {
+        if ($hasChannelFilter) {
             $caseQuery->where('input_mode', $request->channel);
+        }
+
+        if ($reportCategory === 'individual') {
+            $this->applyIndividualFilter($caseQuery, $individualQuery);
         }
 
         $cases = $caseQuery->latest()->get();
@@ -89,6 +143,8 @@ class ReportController extends Controller
 
             if ($caseIds->isNotEmpty()) {
                 $followUpQuery->whereIn('victim_report_id', $caseIds);
+            } elseif ($hasCaseSpecificFilter) {
+                $followUpQuery->whereRaw('1 = 0');
             }
 
             $followUpTasks = $followUpQuery->latest()->get();
@@ -106,11 +162,9 @@ class ReportController extends Controller
                 ->whereBetween('scheduled_at', [$from, $to]);
 
             if ($caseIds->isNotEmpty()) {
-                $appointmentQuery->where(function ($query) use ($caseIds) {
-                    $query
-                        ->whereIn('victim_report_id', $caseIds)
-                        ->orWhereNull('victim_report_id');
-                });
+                $appointmentQuery->whereIn('victim_report_id', $caseIds);
+            } elseif ($hasCaseSpecificFilter) {
+                $appointmentQuery->whereRaw('1 = 0');
             }
 
             $appointments = $appointmentQuery->latest('scheduled_at')->get();
@@ -163,17 +217,19 @@ class ReportController extends Controller
             'success' => true,
             'message' => 'Report generated successfully.',
             'data'    => [
-                'title'       => $this->reportTitle($reportType),
-                'report_type' => $reportType,
-                'generated_at'=> now()->toDateTimeString(),
+                'title'        => $this->reportTitle($reportType, $reportCategory),
+                'report_type'  => $reportType,
+                'generated_at' => now()->toDateTimeString(),
 
-                'filters'     => [
-                    'from'    => $from->toDateString(),
-                    'to'      => $to->toDateString(),
-                    'range'   => $range,
-                    'type'    => $request->get('type', 'all'),
-                    'status'  => $request->get('status', 'all'),
-                    'channel' => $request->get('channel', 'all'),
+                'filters'      => [
+                    'from'             => $from->toDateString(),
+                    'to'               => $to->toDateString(),
+                    'range'            => $range,
+                    'report_category'  => $reportCategory,
+                    'individual_query' => $reportCategory === 'individual' ? $individualQuery : null,
+                    'type'             => $request->get('type', 'all'),
+                    'status'           => $request->get('status', 'all'),
+                    'channel'          => $request->get('channel', 'all'),
                 ],
 
                 'kpis'             => $kpis,
@@ -194,6 +250,9 @@ class ReportController extends Controller
                 })->values(),
 
                 'notes'            => [
+                    'Future dates are not allowed.',
+                    'Date range is handled using Carbon startOfDay and endOfDay.',
+                    'Individual report searches case ID, generated case code, user name, user email, user phone, and national ID only if the column exists.',
                     'District summary uses victim_reports.district when available. If your table does not have district, records may show as Unknown.',
                     'Channel means input_mode from victim_reports.',
                 ],
@@ -201,9 +260,76 @@ class ReportController extends Controller
         ]);
     }
 
+    private function applyIndividualFilter(Builder $caseQuery, string $individualQuery): void
+    {
+        $search = trim($individualQuery);
+        $like = '%' . $search . '%';
+
+        $digitsOnly = preg_replace('/\D+/', '', $search);
+        $possibleId = $digitsOnly !== '' ? (int) ltrim($digitsOnly, '0') : null;
+
+        $victimReportColumns = [
+            'case_code',
+            'reporter_name',
+            'reporter_phone',
+            'reporter_email',
+            'phone',
+            'email',
+            'national_id',
+            'nid',
+            'document_number',
+        ];
+
+        $userColumns = [
+            'name',
+            'email',
+            'phone',
+            'national_id',
+            'nid',
+            'document_number',
+        ];
+
+        $caseQuery->where(function ($query) use (
+            $like,
+            $possibleId,
+            $victimReportColumns,
+            $userColumns
+        ) {
+            if ($possibleId && $possibleId > 0) {
+                $query->where('id', $possibleId);
+            }
+
+            foreach ($victimReportColumns as $column) {
+                if (Schema::hasColumn('victim_reports', $column)) {
+                    if ($possibleId && $possibleId > 0) {
+                        $query->orWhere($column, 'LIKE', $like);
+                    } else {
+                        $query->where($column, 'LIKE', $like);
+                    }
+                }
+            }
+
+            $query->orWhereHas('user', function ($userQuery) use ($like, $userColumns) {
+                $firstCondition = true;
+
+                foreach ($userColumns as $column) {
+                    if (Schema::hasColumn('users', $column)) {
+                        if ($firstCondition) {
+                            $userQuery->where($column, 'LIKE', $like);
+                            $firstCondition = false;
+                        } else {
+                            $userQuery->orWhere($column, 'LIKE', $like);
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     private function buildTrend(Collection $cases, Carbon $from, Carbon $to): array
     {
         $days = max(0, $from->diffInDays($to));
+
         $grouped = $cases->groupBy(function ($case) {
             return Carbon::parse($case->created_at)->toDateString();
         });
@@ -213,6 +339,7 @@ class ReportController extends Controller
 
         for ($i = 0; $i <= $days; $i++) {
             $date = $from->copy()->addDays($i)->toDateString();
+
             $labels[] = $date;
             $values[] = isset($grouped[$date]) ? $grouped[$date]->count() : 0;
         }
@@ -266,17 +393,17 @@ class ReportController extends Controller
     private function transformFollowUpRow(CaseFollowUpTask $task): array
     {
         return [
-            'id'          => $task->id,
-            'task_code'   => 'T-' . str_pad($task->id, 3, '0', STR_PAD_LEFT),
-            'case_code'   => 'CASE-' . str_pad($task->victim_report_id, 4, '0', STR_PAD_LEFT),
-            'title'       => $task->title,
-            'priority'    => $task->priority,
-            'status'      => $task->status,
-            'assigned_to' => $task->assignee?->name ?? 'Unassigned',
-            'created_by'  => $task->creator?->name ?? 'Unknown',
-            'due_date'    => optional($task->due_date)->format('Y-m-d'),
-            'completed_at'=> optional($task->completed_at)->toDateTimeString(),
-            'created_at'  => optional($task->created_at)->toDateTimeString(),
+            'id'           => $task->id,
+            'task_code'    => 'T-' . str_pad($task->id, 3, '0', STR_PAD_LEFT),
+            'case_code'    => 'CASE-' . str_pad($task->victim_report_id, 4, '0', STR_PAD_LEFT),
+            'title'        => $task->title,
+            'priority'     => $task->priority,
+            'status'       => $task->status,
+            'assigned_to'  => $task->assignee?->name ?? 'Unassigned',
+            'created_by'   => $task->creator?->name ?? 'Unknown',
+            'due_date'     => optional($task->due_date)->format('Y-m-d'),
+            'completed_at' => optional($task->completed_at)->toDateTimeString(),
+            'created_at'   => optional($task->created_at)->toDateTimeString(),
         ];
     }
 
@@ -299,9 +426,9 @@ class ReportController extends Controller
         ];
     }
 
-    private function reportTitle(string $type): string
+    private function reportTitle(string $type, string $category = 'general'): string
     {
-        return match ($type) {
+        $title = match ($type) {
             'district'     => 'District Summary Report',
             'case_type'    => 'Case Type Report',
             'status'       => 'Case Status Report',
@@ -311,6 +438,12 @@ class ReportController extends Controller
             'appointments' => 'Appointments Report',
             default        => 'General Summary Report',
         };
+
+        if ($category === 'individual') {
+            return 'Individual ' . $title;
+        }
+
+        return 'General ' . $title;
     }
 
     private function caseTypeLabel(?string $value): string
