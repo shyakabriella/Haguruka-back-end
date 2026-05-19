@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
@@ -15,7 +16,11 @@ use Illuminate\Validation\Rule;
 class RegisterController extends BaseController
 {
     /**
-     * Register API
+     * Public Register API
+     *
+     * IMPORTANT:
+     * Any public registration from the mobile victim app becomes a VICTIM user.
+     * Never register public users as haguruka_staff.
      */
     public function register(Request $request): JsonResponse
     {
@@ -41,19 +46,21 @@ class RegisterController extends BaseController
             'name'          => $request->name,
             'email'         => $request->email,
             'phone'         => $request->phone,
-            'password'      => $request->password,
+            'password'      => Hash::make($request->password),
             'status'        => 'active',
             'is_active'     => true,
             'last_login_at' => null,
         ]);
 
-        if (Schema::hasTable('roles') && Schema::hasTable('role_user')) {
-            $defaultRole = Role::where('slug', 'haguruka_staff')->first();
-
-            if ($defaultRole) {
-                $user->roles()->syncWithoutDetaching([$defaultRole->id]);
-            }
-        }
+        /*
+        |--------------------------------------------------------------------------
+        | SECURITY FIX
+        |--------------------------------------------------------------------------
+        | Public registration must create a victim account, not a staff account.
+        | This prevents a new victim from seeing all system cases.
+        |--------------------------------------------------------------------------
+        */
+        $this->assignSingleRole($user, 'victim', 'Victim');
 
         $user->load('roles:id,name,slug');
 
@@ -103,6 +110,14 @@ class RegisterController extends BaseController
         /** @var \App\Models\User $user */
         $user = User::with('roles:id,name,slug')->find(Auth::id());
 
+        if (!$user) {
+            Auth::logout();
+
+            return $this->sendError('Unauthorised.', [
+                'error' => 'User not found.',
+            ]);
+        }
+
         if (!$user->is_active || $user->status !== 'active') {
             Auth::logout();
 
@@ -126,11 +141,35 @@ class RegisterController extends BaseController
         return $this->sendResponse($success, 'User login successfully.');
     }
 
+    /**
+     * GET /api/me
+     *
+     * Returns only the currently logged-in user.
+     * Victim dashboard must use this endpoint to know who is logged in.
+     */
+    public function me(Request $request): JsonResponse
+    {
+        /** @var \App\Models\User|null $user */
+        $user = $request->user();
+
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        $user->load('roles:id,name,slug');
+
+        return $this->sendResponse($this->formatUserForAuth($user), 'Authenticated user fetched successfully.');
+    }
+
     /*
     |--------------------------------------------------------------------------
     | Users & Roles API
     |--------------------------------------------------------------------------
-    | These are used by your UsersRoles.jsx page.
+    | These endpoints are system/admin endpoints.
+    | Victims must not access all users or all roles.
     |--------------------------------------------------------------------------
     */
 
@@ -139,6 +178,10 @@ class RegisterController extends BaseController
      */
     public function roles(Request $request): JsonResponse
     {
+        if ($deny = $this->denyIfCannotManageUsers($request)) {
+            return $deny;
+        }
+
         $roles = Role::query()
             ->select('id', 'name', 'slug', 'description', 'is_active')
             ->orderBy('name')
@@ -152,6 +195,10 @@ class RegisterController extends BaseController
      */
     public function users(Request $request): JsonResponse
     {
+        if ($deny = $this->denyIfCannotManageUsers($request)) {
+            return $deny;
+        }
+
         $users = User::with('roles:id,name,slug')
             ->select(
                 'id',
@@ -167,14 +214,23 @@ class RegisterController extends BaseController
             ->latest()
             ->get();
 
-        return $this->sendResponse($users, 'Users fetched successfully.');
+        return $this->sendResponse(
+            $users->map(fn (User $user) => $this->formatUserForList($user))->values(),
+            'Users fetched successfully.'
+        );
     }
 
     /**
      * POST /api/users
+     *
+     * Admin/staff creates system users.
      */
     public function storeUser(Request $request): JsonResponse
     {
+        if ($deny = $this->denyIfCannotManageUsers($request)) {
+            return $deny;
+        }
+
         $validator = Validator::make(
             $request->all(),
             [
@@ -183,7 +239,6 @@ class RegisterController extends BaseController
                 'phone'     => 'nullable|string|max:20|unique:users,phone|required_without:email',
                 'password'  => 'required|string|min:8',
 
-                // Frontend may send role or role_slug
                 'role'      => 'nullable|string|exists:roles,slug',
                 'role_slug' => 'nullable|string|exists:roles,slug',
 
@@ -210,19 +265,24 @@ class RegisterController extends BaseController
             'name'          => $request->name,
             'email'         => $request->email,
             'phone'         => $request->phone,
-            'password'      => $request->password,
+            'password'      => Hash::make($request->password),
             'status'        => $status,
             'is_active'     => $isActive,
             'last_login_at' => null,
         ]);
 
-        $roleSlug = $request->role_slug ?: $request->role ?: 'haguruka_staff';
+        /*
+        |--------------------------------------------------------------------------
+        | Admin-created users
+        |--------------------------------------------------------------------------
+        | Default to victim if no role is provided, so we never accidentally create
+        | a staff account from missing form data.
+        |--------------------------------------------------------------------------
+        */
+        $roleSlug = $request->role_slug ?: $request->role ?: 'victim';
+        $roleName = $this->roleNameFromSlug($roleSlug);
 
-        $role = Role::where('slug', $roleSlug)->first();
-
-        if ($role) {
-            $user->roles()->sync([$role->id]);
-        }
+        $this->assignSingleRole($user, $roleSlug, $roleName);
 
         $user->load('roles:id,name,slug');
 
@@ -234,6 +294,10 @@ class RegisterController extends BaseController
      */
     public function showUser(Request $request, $id): JsonResponse
     {
+        if ($deny = $this->denyIfCannotManageUsers($request)) {
+            return $deny;
+        }
+
         $user = User::with('roles:id,name,slug')
             ->select(
                 'id',
@@ -262,6 +326,10 @@ class RegisterController extends BaseController
      */
     public function updateUser(Request $request, $id): JsonResponse
     {
+        if ($deny = $this->denyIfCannotManageUsers($request)) {
+            return $deny;
+        }
+
         $user = User::with('roles:id,name,slug')->find($id);
 
         if (!$user) {
@@ -291,7 +359,6 @@ class RegisterController extends BaseController
 
                 'password'  => 'nullable|string|min:8',
 
-                // Frontend may send role or role_slug
                 'role'      => 'nullable|string|exists:roles,slug',
                 'role_slug' => 'nullable|string|exists:roles,slug',
 
@@ -319,7 +386,7 @@ class RegisterController extends BaseController
         }
 
         if ($request->filled('password')) {
-            $data['password'] = $request->password;
+            $data['password'] = Hash::make($request->password);
         }
 
         if ($request->has('is_active')) {
@@ -342,11 +409,7 @@ class RegisterController extends BaseController
         $roleSlug = $request->role_slug ?: $request->role;
 
         if ($roleSlug) {
-            $role = Role::where('slug', $roleSlug)->first();
-
-            if ($role) {
-                $user->roles()->sync([$role->id]);
-            }
+            $this->assignSingleRole($user, $roleSlug, $this->roleNameFromSlug($roleSlug));
         }
 
         $user->refresh();
@@ -360,6 +423,10 @@ class RegisterController extends BaseController
      */
     public function deleteUser(Request $request, $id): JsonResponse
     {
+        if ($deny = $this->denyIfCannotManageUsers($request)) {
+            return $deny;
+        }
+
         $user = User::find($id);
 
         if (!$user) {
@@ -368,7 +435,7 @@ class RegisterController extends BaseController
             ]);
         }
 
-        if ($request->user() && $request->user()->id === $user->id) {
+        if ($request->user() && (int) $request->user()->id === (int) $user->id) {
             return $this->sendError('Action not allowed.', [
                 'error' => 'You cannot delete your own account while logged in.',
             ]);
@@ -389,52 +456,192 @@ class RegisterController extends BaseController
     |--------------------------------------------------------------------------
     */
 
+    private function denyIfCannotManageUsers(Request $request): ?JsonResponse
+    {
+        if ($this->canManageUsers($request)) {
+            return null;
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Only admin or Haguruka staff can access users and roles.',
+        ], 403);
+    }
+
+    private function canManageUsers(Request $request): bool
+    {
+        $user = $request->user();
+
+        if (!$user) {
+            return false;
+        }
+
+        $allowedRoles = [
+            'admin',
+            'super_admin',
+            'haguruka_staff',
+        ];
+
+        foreach ($this->getUserRoleSlugs($user) as $role) {
+            if (in_array($role, $allowedRoles, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function getUserRoleSlugs(User $user): array
+    {
+        if (!$user->relationLoaded('roles')) {
+            $user->load('roles:id,name,slug');
+        }
+
+        $roles = [];
+
+        if ($user->roles) {
+            foreach ($user->roles as $role) {
+                if (!empty($role->slug)) {
+                    $roles[] = strtolower(trim((string) $role->slug));
+                }
+
+                if (!empty($role->name)) {
+                    $roles[] = strtolower(trim((string) $role->name));
+                }
+            }
+        }
+
+        foreach (['role', 'role_slug', 'user_role', 'type'] as $field) {
+            if (!empty($user->{$field}) && is_string($user->{$field})) {
+                $roles[] = strtolower(trim($user->{$field}));
+            }
+        }
+
+        return array_values(array_unique(array_filter($roles)));
+    }
+
+    private function assignSingleRole(User $user, string $slug, string $name): void
+    {
+        if (!Schema::hasTable('roles') || !Schema::hasTable('role_user')) {
+            return;
+        }
+
+        $role = $this->findOrCreateRole($slug, $name);
+
+        if ($role) {
+            $user->roles()->sync([$role->id]);
+        }
+    }
+
+    private function findOrCreateRole(string $slug, string $name): ?Role
+    {
+        $role = Role::where('slug', $slug)->first();
+
+        if ($role) {
+            return $role;
+        }
+
+        try {
+            $role = new Role();
+            $role->name = $name;
+            $role->slug = $slug;
+
+            if (Schema::hasColumn('roles', 'description')) {
+                $role->description = $name . ' account';
+            }
+
+            if (Schema::hasColumn('roles', 'is_active')) {
+                $role->is_active = true;
+            }
+
+            $role->save();
+
+            return $role;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function roleNameFromSlug(string $slug): string
+    {
+        return match ($slug) {
+            'admin'          => 'Admin',
+            'super_admin'    => 'Super Admin',
+            'haguruka_staff' => 'Haguruka Staff',
+            'staff'          => 'Staff',
+            'case_manager'   => 'Case Manager',
+            'victim'         => 'Victim',
+            default          => ucwords(str_replace('_', ' ', $slug)),
+        };
+    }
+
     private function formatUserForAuth(User $user): array
     {
         $primaryRole = $this->getPrimaryRole($user);
-        $isAdmin = $this->userIsAdmin($user);
+        $roleSlug = $primaryRole['slug'] ?? null;
 
         return [
-            'id'            => $user->id,
-            'name'          => $user->name,
-            'email'         => $user->email,
-            'phone'         => $user->phone,
-            'status'        => $user->status,
-            'is_active'     => $user->is_active,
-            'last_login_at' => $user->last_login_at,
-            'roles'         => $user->roles,
+            'id'                => $user->id,
+            'name'              => $user->name,
+            'email'             => $user->email,
+            'phone'             => $user->phone,
+            'status'            => $user->status,
+            'is_active'         => $user->is_active,
+            'last_login_at'     => optional($user->last_login_at)->toDateTimeString(),
+            'roles'             => $user->roles,
 
-            // Easy frontend fields
-            'role'          => $primaryRole,
-            'role_slug'     => $primaryRole['slug'] ?? null,
-            'role_name'     => $primaryRole['name'] ?? null,
-            'is_admin'      => $isAdmin,
+            'role'              => $primaryRole,
+            'role_slug'         => $roleSlug,
+            'role_name'         => $primaryRole['name'] ?? null,
+
+            'is_admin'          => in_array($roleSlug, ['admin', 'super_admin'], true),
+            'can_manage_system' => $this->canManageUsersForUser($user),
+            'is_victim'         => $roleSlug === 'victim' || !$this->canManageUsersForUser($user),
         ];
     }
 
     private function formatUserForList(User $user): array
     {
         $primaryRole = $this->getPrimaryRole($user);
-        $isAdmin = $this->userIsAdmin($user);
+        $roleSlug = $primaryRole['slug'] ?? null;
 
         return [
-            'id'            => $user->id,
-            'name'          => $user->name,
-            'email'         => $user->email,
-            'phone'         => $user->phone,
-            'status'        => $user->status,
-            'is_active'     => $user->is_active,
-            'last_login_at' => $user->last_login_at,
-            'created_at'    => $user->created_at,
-            'updated_at'    => $user->updated_at,
-            'roles'         => $user->roles,
+            'id'                => $user->id,
+            'name'              => $user->name,
+            'email'             => $user->email,
+            'phone'             => $user->phone,
+            'status'            => $user->status,
+            'is_active'         => $user->is_active,
+            'last_login_at'     => optional($user->last_login_at)->toDateTimeString(),
+            'created_at'        => optional($user->created_at)->toDateTimeString(),
+            'updated_at'        => optional($user->updated_at)->toDateTimeString(),
+            'roles'             => $user->roles,
 
-            // Easy frontend fields
-            'role'          => $primaryRole,
-            'role_slug'     => $primaryRole['slug'] ?? null,
-            'role_name'     => $primaryRole['name'] ?? null,
-            'is_admin'      => $isAdmin,
+            'role'              => $primaryRole,
+            'role_slug'         => $roleSlug,
+            'role_name'         => $primaryRole['name'] ?? null,
+
+            'is_admin'          => in_array($roleSlug, ['admin', 'super_admin'], true),
+            'can_manage_system' => $this->canManageUsersForUser($user),
+            'is_victim'         => $roleSlug === 'victim' || !$this->canManageUsersForUser($user),
         ];
+    }
+
+    private function canManageUsersForUser(User $user): bool
+    {
+        $allowedRoles = [
+            'admin',
+            'super_admin',
+            'haguruka_staff',
+        ];
+
+        foreach ($this->getUserRoleSlugs($user) as $role) {
+            if (in_array($role, $allowedRoles, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function getPrimaryRole(User $user): ?array
@@ -444,27 +651,40 @@ class RegisterController extends BaseController
         }
 
         if (!$user->roles || $user->roles->count() === 0) {
-            return null;
+            return [
+                'id'   => null,
+                'name' => 'Victim',
+                'slug' => 'victim',
+            ];
         }
 
-        $adminRole = $user->roles->firstWhere('slug', 'admin');
-        $role = $adminRole ?: $user->roles->first();
+        $priority = [
+            'super_admin',
+            'admin',
+            'haguruka_staff',
+            'staff',
+            'case_manager',
+            'victim',
+        ];
+
+        foreach ($priority as $slug) {
+            $role = $user->roles->firstWhere('slug', $slug);
+
+            if ($role) {
+                return [
+                    'id'   => $role->id,
+                    'name' => $role->name,
+                    'slug' => $role->slug,
+                ];
+            }
+        }
+
+        $role = $user->roles->first();
 
         return [
             'id'   => $role->id,
             'name' => $role->name,
             'slug' => $role->slug,
         ];
-    }
-
-    private function userIsAdmin(User $user): bool
-    {
-        if (!$user->relationLoaded('roles')) {
-            $user->load('roles:id,name,slug');
-        }
-
-        return $user->roles->contains(function ($role) {
-            return $role->slug === 'admin';
-        });
     }
 }

@@ -11,6 +11,13 @@ use Illuminate\Support\Facades\Validator;
 
 class AppointmentController extends Controller
 {
+    /**
+     * List appointments.
+     *
+     * SECURITY RULE:
+     * - Admin / Haguruka staff can see all appointments.
+     * - Victim can see ONLY appointments connected to his/her own reports.
+     */
     public function index(Request $request): JsonResponse
     {
         $query = Appointment::query()
@@ -21,28 +28,45 @@ class AppointmentController extends Controller
             ])
             ->latest('scheduled_at');
 
-        /*
-        |--------------------------------------------------------------------------
-        | Access rule
-        |--------------------------------------------------------------------------
-        | Admin/Haguruka staff: see all appointments.
-        | Normal user/victim: see appointments:
-        | - assigned to them
-        | - created by them
-        | - connected to victim reports they submitted
-        |--------------------------------------------------------------------------
-        */
         if (!$this->canManageAppointments($request)) {
             $userId = $request->user()?->id;
 
-            $query->where(function ($subQuery) use ($userId) {
-                $subQuery
-                    ->where('assigned_to', $userId)
-                    ->orWhere('created_by', $userId)
-                    ->orWhereHas('victimReport', function ($caseQuery) use ($userId) {
-                        $caseQuery->where('user_id', $userId);
-                    });
+            if (!$userId) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Appointments fetched successfully.',
+                    'data'    => [
+                        'data' => [],
+                        'current_page' => 1,
+                        'per_page' => 10,
+                        'total' => 0,
+                    ],
+                ]);
+            }
+
+            $query->whereHas('victimReport', function ($caseQuery) use ($userId) {
+                $caseQuery->where('user_id', $userId);
             });
+        }
+
+        if ($request->filled('victim_report_id')) {
+            $report = VictimReport::find($request->victim_report_id);
+
+            if (!$report) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Victim report not found.',
+                ], 404);
+            }
+
+            if (!$this->canAccessCase($request, $report)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'You are not allowed to access appointments for this case.',
+                ], 403);
+            }
+
+            $query->where('victim_report_id', $report->id);
         }
 
         if ($request->filled('status') && $request->status !== 'all') {
@@ -57,16 +81,14 @@ class AppointmentController extends Controller
             $query->where('appointment_type', $request->appointment_type);
         }
 
-        if ($request->filled('assigned_to') && $request->assigned_to !== 'all') {
-            $query->where('assigned_to', $request->assigned_to);
-        }
-
-        if ($request->filled('victim_report_id')) {
-            $query->where('victim_report_id', $request->victim_report_id);
+        if ($this->canManageAppointments($request)) {
+            if ($request->filled('assigned_to') && $request->assigned_to !== 'all') {
+                $query->where('assigned_to', $request->assigned_to);
+            }
         }
 
         if ($request->filled('q')) {
-            $q = $request->q;
+            $q = trim((string) $request->q);
 
             $query->where(function ($subQuery) use ($q) {
                 $subQuery
@@ -75,30 +97,12 @@ class AppointmentController extends Controller
                     ->orWhere('notes', 'like', "%{$q}%")
                     ->orWhere('appointment_type', 'like', "%{$q}%")
                     ->orWhere('status', 'like', "%{$q}%")
-                    ->orWhereHas('assignee', function ($userQuery) use ($q) {
-                        $userQuery
-                            ->where('name', 'like', "%{$q}%")
-                            ->orWhere('email', 'like', "%{$q}%")
-                            ->orWhere('phone', 'like', "%{$q}%");
-                    })
-                    ->orWhereHas('creator', function ($userQuery) use ($q) {
-                        $userQuery
-                            ->where('name', 'like', "%{$q}%")
-                            ->orWhere('email', 'like', "%{$q}%")
-                            ->orWhere('phone', 'like', "%{$q}%");
-                    })
                     ->orWhereHas('victimReport', function ($reportQuery) use ($q) {
                         $reportQuery
                             ->where('case_type', 'like', "%{$q}%")
                             ->orWhere('details', 'like', "%{$q}%")
                             ->orWhere('status', 'like', "%{$q}%")
                             ->orWhere('urgency', 'like', "%{$q}%");
-                    })
-                    ->orWhereHas('victimReport.user', function ($userQuery) use ($q) {
-                        $userQuery
-                            ->where('name', 'like', "%{$q}%")
-                            ->orWhere('email', 'like', "%{$q}%")
-                            ->orWhere('phone', 'like', "%{$q}%");
                     });
             });
         }
@@ -108,8 +112,8 @@ class AppointmentController extends Controller
 
         $appointments = $query->paginate($perPage);
 
-        $appointments->getCollection()->transform(function ($appointment) {
-            return $this->transformAppointment($appointment);
+        $appointments->getCollection()->transform(function ($appointment) use ($request) {
+            return $this->transformAppointment($request, $appointment);
         });
 
         return response()->json([
@@ -119,6 +123,12 @@ class AppointmentController extends Controller
         ]);
     }
 
+    /**
+     * Show one appointment.
+     *
+     * SECURITY RULE:
+     * Victim cannot open another victim appointment by changing appointment ID.
+     */
     public function show(Request $request, Appointment $appointment): JsonResponse
     {
         $appointment->load([
@@ -137,10 +147,16 @@ class AppointmentController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Appointment fetched successfully.',
-            'data'    => $this->transformAppointment($appointment),
+            'data'    => $this->transformAppointment($request, $appointment),
         ]);
     }
 
+    /**
+     * Create appointment.
+     *
+     * SECURITY RULE:
+     * Only admin / Haguruka staff can create appointments.
+     */
     public function store(Request $request): JsonResponse
     {
         if (!$this->canManageAppointments($request)) {
@@ -200,10 +216,16 @@ class AppointmentController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Appointment created successfully.',
-            'data'    => $this->transformAppointment($appointment),
+            'data'    => $this->transformAppointment($request, $appointment),
         ], 201);
     }
 
+    /**
+     * Update appointment.
+     *
+     * SECURITY RULE:
+     * Only admin / Haguruka staff can update appointments.
+     */
     public function update(Request $request, Appointment $appointment): JsonResponse
     {
         if (!$this->canManageAppointments($request)) {
@@ -278,10 +300,16 @@ class AppointmentController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Appointment updated successfully.',
-            'data'    => $this->transformAppointment($appointment),
+            'data'    => $this->transformAppointment($request, $appointment),
         ]);
     }
 
+    /**
+     * Delete appointment.
+     *
+     * SECURITY RULE:
+     * Only admin / Haguruka staff can delete appointments.
+     */
     public function destroy(Request $request, Appointment $appointment): JsonResponse
     {
         if (!$this->canManageAppointments($request)) {
@@ -305,6 +333,9 @@ class AppointmentController extends Controller
         ]);
     }
 
+    /**
+     * Sync case status from appointments.
+     */
     private function syncCaseStatusFromAppointments(?int $victimReportId): void
     {
         if (!$victimReportId) {
@@ -317,11 +348,6 @@ class AppointmentController extends Controller
             return;
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Do not reopen or overwrite final victim decisions/admin final statuses.
-        |--------------------------------------------------------------------------
-        */
         if (in_array($report->status, ['closed', 'withdrawn', 'rejected'], true)) {
             return;
         }
@@ -356,6 +382,9 @@ class AppointmentController extends Controller
         }
     }
 
+    /**
+     * Victim can access only appointment connected to his/her own case.
+     */
     private function canAccessAppointment(Request $request, Appointment $appointment): bool
     {
         if ($this->canManageAppointments($request)) {
@@ -364,37 +393,125 @@ class AppointmentController extends Controller
 
         $appointment->loadMissing('victimReport');
 
-        $userId = (int) $request->user()?->id;
+        $userId = $request->user()?->id;
 
-        return (int) $appointment->created_by === $userId
-            || (int) $appointment->assigned_to === $userId
-            || (int) $appointment->victimReport?->user_id === $userId;
+        if (!$userId) {
+            return false;
+        }
+
+        return (int) $appointment->victimReport?->user_id === (int) $userId;
     }
 
+    /**
+     * Victim can access only his/her own report.
+     */
+    private function canAccessCase(Request $request, VictimReport $report): bool
+    {
+        if ($this->canManageAppointments($request)) {
+            return true;
+        }
+
+        $userId = $request->user()?->id;
+
+        if (!$userId) {
+            return false;
+        }
+
+        return (int) $report->user_id === (int) $userId;
+    }
+
+    /**
+     * Admin/staff permission.
+     *
+     * Supports:
+     * - users.role
+     * - users.role_slug
+     * - users.user_role
+     * - users.type
+     * - roles relationship with slug/name
+     */
     private function canManageAppointments(Request $request): bool
     {
         $user = $request->user();
 
-        if (!$user || !method_exists($user, 'roles')) {
+        if (!$user) {
             return false;
         }
 
-        $slugs = $user->roles()->pluck('slug')->toArray();
+        $allowedRoles = [
+            'admin',
+            'super_admin',
+            'haguruka_staff',
+            'staff',
+            'case_manager',
+        ];
 
-        return in_array('admin', $slugs, true)
-            || in_array('haguruka_staff', $slugs, true);
+        $roles = $this->getUserRoleSlugs($user);
+
+        foreach ($roles as $role) {
+            if (in_array($role, $allowedRoles, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
-    private function transformAppointment(Appointment $appointment): array
+    /**
+     * Get user roles safely.
+     */
+    private function getUserRoleSlugs($user): array
+    {
+        $roles = [];
+
+        foreach (['role', 'role_slug', 'user_role', 'type'] as $field) {
+            if (!empty($user->{$field}) && is_string($user->{$field})) {
+                $roles[] = strtolower(trim($user->{$field}));
+            }
+        }
+
+        if (!empty($user->role) && is_object($user->role)) {
+            foreach (['slug', 'name'] as $field) {
+                if (!empty($user->role->{$field})) {
+                    $roles[] = strtolower(trim((string) $user->role->{$field}));
+                }
+            }
+        }
+
+        try {
+            if (method_exists($user, 'roles')) {
+                foreach ($user->roles()->get() as $role) {
+                    foreach (['slug', 'name'] as $field) {
+                        if (!empty($role->{$field})) {
+                            $roles[] = strtolower(trim((string) $role->{$field}));
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            //
+        }
+
+        return array_values(array_unique(array_filter($roles)));
+    }
+
+    /**
+     * Transform appointment response.
+     *
+     * SECURITY:
+     * Victim receives only minimal staff/admin data.
+     */
+    private function transformAppointment(Request $request, Appointment $appointment): array
     {
         $report = $appointment->victimReport;
         $reportUser = $report?->user;
+        $isManager = $this->canManageAppointments($request);
 
         $clientName = $appointment->client_name
             ?: $reportUser?->name
             ?: 'Anonymous';
 
-        return [
+        $base = [
             'id'               => $appointment->id,
             'appointment_code' => 'APT-' . str_pad($appointment->id, 4, '0', STR_PAD_LEFT),
 
@@ -412,10 +529,6 @@ class AppointmentController extends Controller
                 'user_id'   => $report->user_id,
             ] : null,
 
-            'client_name'      => $clientName,
-            'client_email'     => $reportUser?->email,
-            'client_phone'     => $reportUser?->phone,
-
             'appointment_type' => $appointment->appointment_type,
             'district'         => $appointment->district,
             'scheduled_at'     => optional($appointment->scheduled_at)->toDateTimeString(),
@@ -425,20 +538,12 @@ class AppointmentController extends Controller
             'status'           => $appointment->status,
             'notes'            => $appointment->notes,
 
-            'created_by'       => $appointment->created_by,
-            'creator'          => $appointment->creator ? [
-                'id'    => $appointment->creator->id,
-                'name'  => $appointment->creator->name,
-                'email' => $appointment->creator->email,
-                'phone' => $appointment->creator->phone,
-            ] : null,
-
             'assigned_to'      => $appointment->assigned_to,
             'assignee'         => $appointment->assignee ? [
                 'id'    => $appointment->assignee->id,
                 'name'  => $appointment->assignee->name,
-                'email' => $appointment->assignee->email,
-                'phone' => $appointment->assignee->phone,
+                'email' => $isManager ? $appointment->assignee->email : null,
+                'phone' => $isManager ? $appointment->assignee->phone : null,
             ] : null,
 
             'completed_at'     => optional($appointment->completed_at)->toDateTimeString(),
@@ -446,5 +551,33 @@ class AppointmentController extends Controller
             'created_at'       => optional($appointment->created_at)->toDateTimeString(),
             'updated_at'       => optional($appointment->updated_at)->toDateTimeString(),
         ];
+
+        if ($isManager) {
+            $base['client_name'] = $clientName;
+            $base['client_email'] = $reportUser?->email;
+            $base['client_phone'] = $reportUser?->phone;
+
+            $base['created_by'] = $appointment->created_by;
+            $base['creator'] = $appointment->creator ? [
+                'id'    => $appointment->creator->id,
+                'name'  => $appointment->creator->name,
+                'email' => $appointment->creator->email,
+                'phone' => $appointment->creator->phone,
+            ] : null;
+        } else {
+            $base['client_name'] = 'You';
+            $base['client_email'] = null;
+            $base['client_phone'] = null;
+
+            $base['created_by'] = null;
+            $base['creator'] = $appointment->creator ? [
+                'id'    => $appointment->creator->id,
+                'name'  => $appointment->creator->name,
+                'email' => null,
+                'phone' => null,
+            ] : null;
+        }
+
+        return $base;
     }
 }

@@ -18,7 +18,19 @@ Route::controller(RegisterController::class)->group(function () {
 Route::middleware('auth:sanctum')->group(function () {
     /*
     |--------------------------------------------------------------------------
+    | Current logged-in user
+    |--------------------------------------------------------------------------
+    | Mobile victim dashboard must call this endpoint after login.
+    | It returns only the authenticated user's own profile.
+    |--------------------------------------------------------------------------
+    */
+    Route::get('me', [RegisterController::class, 'me']);
+
+    /*
+    |--------------------------------------------------------------------------
     | Users & Roles routes
+    |--------------------------------------------------------------------------
+    | Controller protects these routes so victims receive 403.
     |--------------------------------------------------------------------------
     */
     Route::get('roles', [RegisterController::class, 'roles']);
@@ -54,10 +66,6 @@ Route::middleware('auth:sanctum')->group(function () {
     /*
     |--------------------------------------------------------------------------
     | Victim Case Actions routes
-    |--------------------------------------------------------------------------
-    | Used by mobile app:
-    | POST /api/victim-reports/{id}/withdraw
-    | POST /api/victim-reports/{id}/close
     |--------------------------------------------------------------------------
     */
     Route::post('victim-reports/{report}/withdraw', [CaseActionController::class, 'withdraw']);
@@ -103,16 +111,12 @@ Route::middleware('auth:sanctum')->group(function () {
     |--------------------------------------------------------------------------
     | Reports & Statistics routes
     |--------------------------------------------------------------------------
-    | Keep reports/summary before reports/{id}.
-    |--------------------------------------------------------------------------
     */
     Route::get('reports/summary', [ReportController::class, 'summary']);
 
     /*
     |--------------------------------------------------------------------------
     | Case Status Update route
-    |--------------------------------------------------------------------------
-    | Keep this before victim-reports/{id}.
     |--------------------------------------------------------------------------
     */
     Route::patch('victim-reports/{id}/status', [VictimReportController::class, 'updateStatus']);
@@ -122,16 +126,12 @@ Route::middleware('auth:sanctum')->group(function () {
     |--------------------------------------------------------------------------
     | Single Victim Report route
     |--------------------------------------------------------------------------
-    | Keep this after special victim-report routes.
-    |--------------------------------------------------------------------------
     */
     Route::get('victim-reports/{id}', [VictimReportController::class, 'show']);
 
     /*
     |--------------------------------------------------------------------------
     | Legacy compatibility routes
-    |--------------------------------------------------------------------------
-    | Keep reports/summary above these routes.
     |--------------------------------------------------------------------------
     */
     Route::post('reports', [VictimReportController::class, 'store']);

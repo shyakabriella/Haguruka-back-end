@@ -11,6 +11,10 @@ use Illuminate\Support\Facades\Validator;
 
 class CaseActionController extends Controller
 {
+    /**
+     * Victim withdraws own case.
+     * Admin/staff can withdraw any case.
+     */
     public function withdraw(Request $request, VictimReport $report): JsonResponse
     {
         if (!$this->canAccessCase($request, $report)) {
@@ -84,6 +88,10 @@ class CaseActionController extends Controller
         ]);
     }
 
+    /**
+     * Victim closes own case.
+     * Admin/staff can close any case.
+     */
     public function close(Request $request, VictimReport $report): JsonResponse
     {
         if (!$this->canAccessCase($request, $report)) {
@@ -157,32 +165,96 @@ class CaseActionController extends Controller
         ]);
     }
 
+    /**
+     * Victim can access only own case.
+     * Admin/staff can access all.
+     */
     private function canAccessCase(Request $request, VictimReport $report): bool
     {
         if ($this->canManageCases($request)) {
             return true;
         }
 
-        return (int) $report->user_id === (int) $request->user()?->id;
+        $userId = $request->user()?->id;
+
+        if (!$userId) {
+            return false;
+        }
+
+        return (int) $report->user_id === (int) $userId;
     }
 
+    /**
+     * Admin/staff permission.
+     */
     private function canManageCases(Request $request): bool
     {
         $user = $request->user();
 
-        if (!$user || !method_exists($user, 'roles')) {
+        if (!$user) {
             return false;
         }
 
-        $slugs = $user->roles()->pluck('slug')->toArray();
+        $allowedRoles = [
+            'admin',
+            'super_admin',
+            'haguruka_staff',
+            'staff',
+            'case_manager',
+        ];
 
-        return in_array('admin', $slugs, true)
-            || in_array('haguruka_staff', $slugs, true);
+        $userRoles = $this->getUserRoleSlugs($user);
+
+        foreach ($userRoles as $role) {
+            if (in_array($role, $allowedRoles, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Get role slugs/names from user model safely.
+     */
+    private function getUserRoleSlugs($user): array
+    {
+        $roles = [];
+
+        foreach (['role', 'role_slug', 'user_role', 'type'] as $field) {
+            if (!empty($user->{$field}) && is_string($user->{$field})) {
+                $roles[] = strtolower(trim($user->{$field}));
+            }
+        }
+
+        if (!empty($user->role) && is_object($user->role)) {
+            foreach (['slug', 'name'] as $field) {
+                if (!empty($user->role->{$field})) {
+                    $roles[] = strtolower(trim((string) $user->role->{$field}));
+                }
+            }
+        }
+
+        try {
+            if (method_exists($user, 'roles')) {
+                foreach ($user->roles()->get() as $role) {
+                    foreach (['slug', 'name'] as $field) {
+                        if (!empty($role->{$field})) {
+                            $roles[] = strtolower(trim((string) $role->{$field}));
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            // Ignore role lookup errors and keep user as non-admin.
+        }
+
+        return array_values(array_unique(array_filter($roles)));
     }
 
     private function isFinalized(?string $status): bool
     {
-        return in_array($status, ['closed', 'withdrawn', 'rejected'], true);
+        return in_array(strtolower((string) $status), ['closed', 'withdrawn', 'rejected'], true);
     }
 
     private function transformCase(VictimReport $report): array
@@ -203,7 +275,7 @@ class CaseActionController extends Controller
             'status'         => $report->status,
 
             'withdraw_reason' => $report->withdraw_reason ?? null,
-            'withdrawn_at'    => optional($report->withdrawn_at)->toDateTimeString(),
+            'withdrawn_at'    => $this->formatDateTime($report->withdrawn_at ?? null),
             'withdrawn_by'    => $report->withdrawn_by ?? null,
             'withdrawn_by_user' => $report->withdrawnBy ? [
                 'id'    => $report->withdrawnBy->id,
@@ -213,7 +285,7 @@ class CaseActionController extends Controller
             ] : null,
 
             'closed_reason' => $report->closed_reason ?? null,
-            'closed_at'     => optional($report->closed_at)->toDateTimeString(),
+            'closed_at'     => $this->formatDateTime($report->closed_at ?? null),
             'closed_by'     => $report->closed_by ?? null,
             'closed_by_user' => $report->closedBy ? [
                 'id'    => $report->closedBy->id,
@@ -241,8 +313,28 @@ class CaseActionController extends Controller
                 })->values()
                 : [],
 
-            'created_at' => optional($report->created_at)->toDateTimeString(),
-            'updated_at' => optional($report->updated_at)->toDateTimeString(),
+            'created_at' => $this->formatDateTime($report->created_at),
+            'updated_at' => $this->formatDateTime($report->updated_at),
         ];
+    }
+
+    /**
+     * Format datetime safely.
+     */
+    private function formatDateTime($value): ?string
+    {
+        if (!$value) {
+            return null;
+        }
+
+        try {
+            if ($value instanceof \Carbon\CarbonInterface) {
+                return $value->toDateTimeString();
+            }
+
+            return \Carbon\Carbon::parse($value)->toDateTimeString();
+        } catch (\Throwable $e) {
+            return null;
+        }
     }
 }

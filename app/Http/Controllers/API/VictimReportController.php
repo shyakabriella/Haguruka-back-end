@@ -7,7 +7,6 @@ use App\Models\ReportEvidence;
 use App\Models\VictimReport;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
@@ -15,7 +14,10 @@ use Illuminate\Support\Facades\Validator;
 class VictimReportController extends Controller
 {
     /**
-     * Get victim reports.
+     * List victim reports.
+     *
+     * Admin/staff can see all.
+     * Victim can see only own cases.
      */
     public function index(Request $request): JsonResponse
     {
@@ -23,13 +25,26 @@ class VictimReportController extends Controller
             ->with([
                 'user:id,name,email,phone',
                 'evidences',
-                'withdrawnBy:id,name,email,phone',
-                'closedBy:id,name,email,phone',
             ])
             ->latest();
 
         if (!$this->canManageCases($request)) {
-            $query->where('user_id', $request->user()?->id);
+            $userId = $request->user()?->id;
+
+            if (!$userId) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Victim reports fetched successfully.',
+                    'data' => [
+                        'data' => [],
+                        'current_page' => 1,
+                        'per_page' => 10,
+                        'total' => 0,
+                    ],
+                ]);
+            }
+
+            $query->where('user_id', $userId);
         }
 
         if ($request->filled('status') && $request->status !== 'all') {
@@ -49,20 +64,23 @@ class VictimReportController extends Controller
         }
 
         if ($request->filled('q')) {
-            $q = $request->q;
+            $q = trim((string) $request->q);
 
-            $query->where(function ($subQuery) use ($q) {
+            $query->where(function ($subQuery) use ($q, $request) {
                 $subQuery
                     ->where('details', 'like', "%{$q}%")
                     ->orWhere('case_type', 'like', "%{$q}%")
                     ->orWhere('urgency', 'like', "%{$q}%")
-                    ->orWhere('status', 'like', "%{$q}%")
-                    ->orWhereHas('user', function ($userQuery) use ($q) {
+                    ->orWhere('status', 'like', "%{$q}%");
+
+                if ($this->canManageCases($request)) {
+                    $subQuery->orWhereHas('user', function ($userQuery) use ($q) {
                         $userQuery
                             ->where('name', 'like', "%{$q}%")
                             ->orWhere('email', 'like', "%{$q}%")
                             ->orWhere('phone', 'like', "%{$q}%");
                     });
+                }
             });
         }
 
@@ -71,8 +89,8 @@ class VictimReportController extends Controller
 
         $reports = $query->paginate($perPage);
 
-        $reports->getCollection()->transform(function ($report) {
-            return $this->transformReport($report);
+        $reports->getCollection()->transform(function ($report) use ($request) {
+            return $this->transformReport($request, $report);
         });
 
         return response()->json([
@@ -87,17 +105,13 @@ class VictimReportController extends Controller
      */
     public function store(Request $request): JsonResponse
     {
-        /*
-        |--------------------------------------------------------------------------
-        | Important evidence upload fix
-        |--------------------------------------------------------------------------
-        | Mobile app must send files using multipart/form-data:
-        | evidences[] = file
-        |
-        | We do NOT validate "evidence" as file because the mobile app keeps
-        | local evidence metadata in a field called evidence.
-        |--------------------------------------------------------------------------
-        */
+        if (!$request->user()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
         $validator = Validator::make($request->all(), [
             'language'      => ['nullable', 'string', 'max:20'],
             'reporter_role' => ['nullable', 'string', 'max:50'],
@@ -110,6 +124,8 @@ class VictimReportController extends Controller
 
             'evidences'     => ['nullable', 'array'],
             'evidences.*'   => ['file', 'max:20480'],
+
+            'evidence'      => ['nullable'],
         ]);
 
         if ($validator->fails()) {
@@ -122,45 +138,17 @@ class VictimReportController extends Controller
 
         $validated = $validator->validated();
 
-        $urgency = $this->safeColumnValue(
-            'victim_reports',
-            'urgency',
-            $this->normalizeUrgency($validated['urgency'] ?? 'low'),
-            'low'
-        );
-
-        $caseType = $this->safeColumnValue(
-            'victim_reports',
-            'case_type',
-            $validated['case_type'] ?? 'other',
-            'other'
-        );
-
-        $inputMode = $this->safeColumnValue(
-            'victim_reports',
-            'input_mode',
-            $validated['input_mode'] ?? 'text',
-            'text'
-        );
-
-        $status = $this->safeColumnValue(
-            'victim_reports',
-            'status',
-            'submitted',
-            'submitted'
-        );
-
         $report = VictimReport::create([
-            'user_id'       => $request->user()?->id,
+            'user_id'       => $request->user()->id,
             'language'      => $validated['language'] ?? 'en',
             'reporter_role' => $validated['reporter_role'] ?? 'victim',
-            'urgency'       => $urgency,
-            'case_type'     => $caseType,
-            'input_mode'    => $inputMode,
+            'urgency'       => $this->normalizeUrgency($validated['urgency'] ?? 'low'),
+            'case_type'     => $validated['case_type'] ?? 'other',
+            'input_mode'    => $validated['input_mode'] ?? 'text',
             'details'       => $validated['details'] ?? null,
             'latitude'      => $validated['latitude'] ?? null,
             'longitude'     => $validated['longitude'] ?? null,
-            'status'        => $status,
+            'status'        => 'submitted',
         ]);
 
         $this->storeEvidenceFiles($request, $report);
@@ -168,22 +156,27 @@ class VictimReportController extends Controller
         $report->load([
             'user:id,name,email,phone',
             'evidences',
-            'withdrawnBy:id,name,email,phone',
-            'closedBy:id,name,email,phone',
         ]);
 
         return response()->json([
             'success' => true,
             'message' => 'Victim report submitted successfully.',
-            'data'    => $this->transformReport($report),
+            'data'    => $this->transformReport($request, $report),
         ], 201);
     }
 
     /**
-     * Quick emergency report from mobile app.
+     * Quick emergency report.
      */
     public function quickEmergency(Request $request): JsonResponse
     {
+        if (!$request->user()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
         $validator = Validator::make($request->all(), [
             'language'  => ['nullable', 'string', 'max:20'],
             'details'   => ['nullable', 'string'],
@@ -201,59 +194,29 @@ class VictimReportController extends Controller
 
         $validated = $validator->validated();
 
-        $urgency = $this->safeColumnValue(
-            'victim_reports',
-            'urgency',
-            'urgent',
-            'low'
-        );
-
-        $caseType = $this->safeColumnValue(
-            'victim_reports',
-            'case_type',
-            'emergency',
-            'other'
-        );
-
-        $inputMode = $this->safeColumnValue(
-            'victim_reports',
-            'input_mode',
-            'quick_emergency',
-            'text'
-        );
-
-        $status = $this->safeColumnValue(
-            'victim_reports',
-            'status',
-            'submitted',
-            'submitted'
-        );
-
         $report = VictimReport::create([
-            'user_id'       => $request->user()?->id,
+            'user_id'       => $request->user()->id,
             'language'      => $validated['language'] ?? 'en',
             'reporter_role' => 'victim',
-            'urgency'       => $urgency,
-            'case_type'     => $caseType,
-            'input_mode'    => $inputMode,
+            'urgency'       => 'urgent',
+            'case_type'     => 'emergency',
+            'input_mode'    => 'quick_emergency',
             'details'       => $validated['details']
                 ?? 'Quick emergency alert submitted from mobile dashboard. Victim may be in immediate danger and needs urgent support.',
             'latitude'      => $validated['latitude'] ?? null,
             'longitude'     => $validated['longitude'] ?? null,
-            'status'        => $status,
+            'status'        => 'submitted',
         ]);
 
         $report->load([
             'user:id,name,email,phone',
             'evidences',
-            'withdrawnBy:id,name,email,phone',
-            'closedBy:id,name,email,phone',
         ]);
 
         return response()->json([
             'success' => true,
             'message' => 'Emergency report submitted successfully.',
-            'data'    => $this->transformReport($report),
+            'data'    => $this->transformReport($request, $report),
         ], 201);
     }
 
@@ -265,8 +228,6 @@ class VictimReportController extends Controller
         $report = VictimReport::with([
             'user:id,name,email,phone',
             'evidences',
-            'withdrawnBy:id,name,email,phone',
-            'closedBy:id,name,email,phone',
         ])->find($id);
 
         if (!$report) {
@@ -286,12 +247,12 @@ class VictimReportController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Victim report fetched successfully.',
-            'data'    => $this->transformReport($report),
+            'data'    => $this->transformReport($request, $report),
         ]);
     }
 
     /**
-     * Update case status from admin dashboard.
+     * Admin/staff update case status.
      */
     public function updateStatus(Request $request, int $id): JsonResponse
     {
@@ -325,13 +286,7 @@ class VictimReportController extends Controller
             ], 422);
         }
 
-        $newStatus = $this->safeColumnValue(
-            'victim_reports',
-            'status',
-            $request->status,
-            $report->status ?: 'submitted'
-        );
-
+        $newStatus = strtolower(trim((string) $request->status));
         $reason = $request->input('reason') ?: $request->input('motif');
 
         $report->status = $newStatus;
@@ -348,6 +303,18 @@ class VictimReportController extends Controller
             if (Schema::hasColumn('victim_reports', 'withdrawn_by')) {
                 $report->withdrawn_by = $request->user()?->id;
             }
+
+            if (Schema::hasColumn('victim_reports', 'closed_reason')) {
+                $report->closed_reason = null;
+            }
+
+            if (Schema::hasColumn('victim_reports', 'closed_at')) {
+                $report->closed_at = null;
+            }
+
+            if (Schema::hasColumn('victim_reports', 'closed_by')) {
+                $report->closed_by = null;
+            }
         }
 
         if ($newStatus === 'closed') {
@@ -362,6 +329,18 @@ class VictimReportController extends Controller
             if (Schema::hasColumn('victim_reports', 'closed_by')) {
                 $report->closed_by = $request->user()?->id;
             }
+
+            if (Schema::hasColumn('victim_reports', 'withdraw_reason')) {
+                $report->withdraw_reason = null;
+            }
+
+            if (Schema::hasColumn('victim_reports', 'withdrawn_at')) {
+                $report->withdrawn_at = null;
+            }
+
+            if (Schema::hasColumn('victim_reports', 'withdrawn_by')) {
+                $report->withdrawn_by = null;
+            }
         }
 
         $report->save();
@@ -369,14 +348,12 @@ class VictimReportController extends Controller
         $report->load([
             'user:id,name,email,phone',
             'evidences',
-            'withdrawnBy:id,name,email,phone',
-            'closedBy:id,name,email,phone',
         ]);
 
         return response()->json([
             'success' => true,
             'message' => 'Case status updated successfully.',
-            'data'    => $this->transformReport($report),
+            'data'    => $this->transformReport($request, $report),
         ]);
     }
 
@@ -430,13 +407,98 @@ class VictimReportController extends Controller
     }
 
     /**
+     * Victim can access only own report.
+     */
+    private function canAccessCase(Request $request, VictimReport $report): bool
+    {
+        if ($this->canManageCases($request)) {
+            return true;
+        }
+
+        $userId = $request->user()?->id;
+
+        if (!$userId) {
+            return false;
+        }
+
+        return (int) $report->user_id === (int) $userId;
+    }
+
+    /**
+     * Admin/staff permission checker.
+     */
+    private function canManageCases(Request $request): bool
+    {
+        $user = $request->user();
+
+        if (!$user) {
+            return false;
+        }
+
+        $allowedRoles = [
+            'admin',
+            'super_admin',
+            'haguruka_staff',
+            'staff',
+            'case_manager',
+        ];
+
+        foreach ($this->getUserRoleSlugs($user) as $role) {
+            if (in_array($role, $allowedRoles, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Get user roles safely.
+     */
+    private function getUserRoleSlugs($user): array
+    {
+        $roles = [];
+
+        foreach (['role', 'role_slug', 'user_role', 'type'] as $field) {
+            if (!empty($user->{$field}) && is_string($user->{$field})) {
+                $roles[] = strtolower(trim($user->{$field}));
+            }
+        }
+
+        if (!empty($user->role) && is_object($user->role)) {
+            foreach (['slug', 'name'] as $field) {
+                if (!empty($user->role->{$field})) {
+                    $roles[] = strtolower(trim((string) $user->role->{$field}));
+                }
+            }
+        }
+
+        try {
+            if (method_exists($user, 'roles')) {
+                foreach ($user->roles()->get() as $role) {
+                    foreach (['slug', 'name'] as $field) {
+                        if (!empty($role->{$field})) {
+                            $roles[] = strtolower(trim((string) $role->{$field}));
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            //
+        }
+
+        return array_values(array_unique(array_filter($roles)));
+    }
+
+    /**
      * Transform report response.
      */
-    private function transformReport(VictimReport $report): array
+    private function transformReport(Request $request, VictimReport $report): array
     {
         $reporter = $report->user;
+        $isManager = $this->canManageCases($request);
 
-        return [
+        $data = [
             'id'             => $report->id,
             'case_code'      => 'CASE-' . str_pad($report->id, 4, '0', STR_PAD_LEFT),
 
@@ -451,36 +513,13 @@ class VictimReportController extends Controller
             'longitude'      => $report->longitude,
             'status'         => $report->status,
 
-            'reporter_name'  => $reporter?->name,
-            'reporter_email' => $reporter?->email,
-            'reporter_phone' => $reporter?->phone,
-
-            'reporter_user'  => $reporter ? [
-                'id'    => $reporter->id,
-                'name'  => $reporter->name,
-                'email' => $reporter->email,
-                'phone' => $reporter->phone,
-            ] : null,
-
             'withdraw_reason' => $report->withdraw_reason ?? null,
             'withdrawn_at'    => optional($report->withdrawn_at)->toDateTimeString(),
             'withdrawn_by'    => $report->withdrawn_by ?? null,
-            'withdrawn_by_user' => $report->withdrawnBy ? [
-                'id'    => $report->withdrawnBy->id,
-                'name'  => $report->withdrawnBy->name,
-                'email' => $report->withdrawnBy->email,
-                'phone' => $report->withdrawnBy->phone,
-            ] : null,
 
-            'closed_reason' => $report->closed_reason ?? null,
-            'closed_at'     => optional($report->closed_at)->toDateTimeString(),
-            'closed_by'     => $report->closed_by ?? null,
-            'closed_by_user' => $report->closedBy ? [
-                'id'    => $report->closedBy->id,
-                'name'  => $report->closedBy->name,
-                'email' => $report->closedBy->email,
-                'phone' => $report->closedBy->phone,
-            ] : null,
+            'closed_reason'   => $report->closed_reason ?? null,
+            'closed_at'       => optional($report->closed_at)->toDateTimeString(),
+            'closed_by'       => $report->closed_by ?? null,
 
             'evidences' => $report->relationLoaded('evidences')
                 ? $report->evidences->map(function ($evidence) {
@@ -498,6 +537,32 @@ class VictimReportController extends Controller
             'created_at' => optional($report->created_at)->toDateTimeString(),
             'updated_at' => optional($report->updated_at)->toDateTimeString(),
         ];
+
+        if ($isManager) {
+            $data['reporter_name'] = $reporter?->name;
+            $data['reporter_email'] = $reporter?->email;
+            $data['reporter_phone'] = $reporter?->phone;
+
+            $data['reporter_user'] = $reporter ? [
+                'id'    => $reporter->id,
+                'name'  => $reporter->name,
+                'email' => $reporter->email,
+                'phone' => $reporter->phone,
+            ] : null;
+        } else {
+            $data['reporter_name'] = 'You';
+            $data['reporter_email'] = null;
+            $data['reporter_phone'] = null;
+
+            $data['reporter_user'] = $reporter ? [
+                'id'    => $reporter->id,
+                'name'  => $reporter->name,
+                'email' => null,
+                'phone' => null,
+            ] : null;
+        }
+
+        return $data;
     }
 
     /**
@@ -517,37 +582,7 @@ class VictimReportController extends Controller
     }
 
     /**
-     * Victim can access only their cases.
-     * Admin/staff can access all.
-     */
-    private function canAccessCase(Request $request, VictimReport $report): bool
-    {
-        if ($this->canManageCases($request)) {
-            return true;
-        }
-
-        return (int) $report->user_id === (int) $request->user()?->id;
-    }
-
-    /**
-     * Admin/staff permission.
-     */
-    private function canManageCases(Request $request): bool
-    {
-        $user = $request->user();
-
-        if (!$user || !method_exists($user, 'roles')) {
-            return false;
-        }
-
-        $slugs = $user->roles()->pluck('slug')->toArray();
-
-        return in_array('admin', $slugs, true)
-            || in_array('haguruka_staff', $slugs, true);
-    }
-
-    /**
-     * Convert unsupported urgency values before saving.
+     * Normalize urgency.
      */
     private function normalizeUrgency(?string $value): string
     {
@@ -561,66 +596,5 @@ class VictimReportController extends Controller
             'urgent' => 'urgent',
             default => 'low',
         };
-    }
-
-    /**
-     * Safely save values for ENUM columns.
-     */
-    private function safeColumnValue(
-        string $table,
-        string $column,
-        ?string $wantedValue,
-        string $fallback
-    ): string {
-        $wantedValue = strtolower(trim((string) $wantedValue));
-        $fallback = strtolower(trim($fallback));
-
-        $allowed = $this->getEnumAllowedValues($table, $column);
-
-        if (empty($allowed)) {
-            return $wantedValue ?: $fallback;
-        }
-
-        if (in_array($wantedValue, $allowed, true)) {
-            return $wantedValue;
-        }
-
-        if (in_array($fallback, $allowed, true)) {
-            return $fallback;
-        }
-
-        return $allowed[0];
-    }
-
-    /**
-     * Read enum allowed values from MySQL column.
-     */
-    private function getEnumAllowedValues(string $table, string $column): array
-    {
-        try {
-            if (!Schema::hasColumn($table, $column)) {
-                return [];
-            }
-
-            $result = DB::select("SHOW COLUMNS FROM {$table} LIKE ?", [$column]);
-
-            if (empty($result)) {
-                return [];
-            }
-
-            $type = $result[0]->Type ?? '';
-
-            if (!str_starts_with($type, 'enum(')) {
-                return [];
-            }
-
-            preg_match_all("/'([^']+)'/", $type, $matches);
-
-            return array_map(function ($value) {
-                return strtolower(trim($value));
-            }, $matches[1] ?? []);
-        } catch (\Throwable $e) {
-            return [];
-        }
     }
 }
